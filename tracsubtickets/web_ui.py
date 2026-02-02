@@ -33,11 +33,7 @@ from trac.web.api import IRequestFilter
 from trac.web.chrome import ITemplateProvider, add_script, add_script_data, add_stylesheet
 from trac.util.html import html as tag
 from trac.ticket.api import ITicketManipulator
-from trac.ticket.model import Ticket
 from trac.ticket.model import Type as TicketType
-from trac.resource import ResourceNotFound
-from genshi.filters import Transformer
-
 from .api import NUMBERS_RE, _
 
 
@@ -176,7 +172,10 @@ class SubTicketsModule(Component):
                 tbody = tag.tbody()
                 div.append(tag.table(tbody, class_='subtickets'))
                 # tickets
-                self._create_subtickets_table(req, data['subtickets'], tbody)
+                all_ids = self._collect_ids(data['subtickets'])
+                tickets_data = self._batch_load_ticket_data(all_ids)
+                self._create_subtickets_table(req, data['subtickets'],
+                                              tbody, tickets_data)
 
             add_stylesheet(req, 'subtickets/css/subtickets.css')
             add_script(req, 'subtickets/js/subtickets.js')
@@ -190,20 +189,45 @@ class SubTicketsModule(Component):
 
         return template, data, content_type
 
+    def _batch_load_ticket_data(self, ticket_ids):
+        """Batch load ticket data for multiple IDs."""
+        if not ticket_ids:
+            return {}
+        id_list = list(ticket_ids)
+        rows = self.env.db_query("""
+            SELECT id, type, status, summary, owner, milestone
+            FROM ticket WHERE id IN %s
+            """, (id_list,))
+        result = {}
+        for row in rows:
+            result[row[0]] = {
+                'type': row[1], 'status': row[2], 'summary': row[3],
+                'owner': row[4], 'milestone': row[5],
+            }
+        custom_rows = self.env.db_query("""
+            SELECT ticket, name, value FROM ticket_custom
+            WHERE ticket IN %s
+            """, (id_list,))
+        for ticket_id, name, value in custom_rows:
+            if ticket_id in result:
+                result[ticket_id][name] = value
+        return result
+
     def _append_parent_links(self, req, data, ids):
+        int_ids = [int(i) for i in ids]
+        tickets_data = self._batch_load_ticket_data(int_ids)
         links = []
-        for id in sorted(ids, key=lambda x: int(x)):
-            try:
-                ticket = Ticket(self.env, id)
-                elem = tag.a('#%s' % id,
-                             href=req.href.ticket(id),
-                             class_='%s ticket' % ticket['status'],
-                             title=ticket['summary'])
-                if len(links) > 0:
-                    links.append(', ')
-                links.append(elem)
-            except ResourceNotFound:
-                pass
+        for id in sorted(int_ids):
+            if id not in tickets_data:
+                continue
+            td = tickets_data[id]
+            elem = tag.a('#%s' % id,
+                         href=req.href.ticket(id),
+                         class_='%s ticket' % td['status'],
+                         title=td['summary'])
+            if len(links) > 0:
+                links.append(', ')
+            links.append(elem)
         for field in data.get('fields', ''):
             if field.get('name') == 'parents':
                 field['rendered'] = tag.span(*links)
@@ -214,18 +238,28 @@ class SubTicketsModule(Component):
         pass
 
     def get_children(self, parent_id, depth=0):
-        children = {}
+        """Get children tree using batch queries per level."""
+        result = {}
+        refs = {parent_id: result}
+        current_parents = [parent_id]
 
-        for parent, child in self.env.db_query("""
+        d = 0
+        while current_parents and (self.opt_recursion_depth == -1 or d <= self.opt_recursion_depth):
+            rows = self.env.db_query("""
                 SELECT parent, child FROM subtickets WHERE parent IN %s
-                """, ([parent_id], )):
-            children[child] = None
+                """, (current_parents,))
 
-        if self.opt_recursion_depth > depth or self.opt_recursion_depth == -1:
-            for id in children:
-                children[id] = self.get_children(id, depth + 1)
+            next_parents = []
+            for parent, child in rows:
+                child_dict = {}
+                refs[parent][child] = child_dict
+                refs[child] = child_dict
+                next_parents.append(child)
 
-        return children
+            current_parents = next_parents
+            d += 1
+
+        return result
 
     def validate_ticket(self, req, ticket):
         action = req.args.get('action')
@@ -234,62 +268,79 @@ class SubTicketsModule(Component):
             return
 
         if action == 'resolve':
-
-            for parent, child in self.env.db_query("""
-                    SELECT parent, child FROM subtickets WHERE parent=%s
-                    """, (ticket.id, )):
-                if Ticket(self.env, child)['status'] != 'closed':
-                    yield None, _("""Cannot close/resolve because child
-                         ticket #%(child)s is still open""",
-                                  child=child)
+            rows = self.env.db_query("""
+                SELECT s.child FROM subtickets s
+                JOIN ticket t ON s.child = t.id
+                WHERE s.parent=%s AND t.status != 'closed'
+                """, (ticket.id,))
+            for child, in rows:
+                yield None, _("""Cannot close/resolve because child
+                     ticket #%(child)s is still open""",
+                              child=child)
 
         elif action == 'reopen':
-            ids = set(NUMBERS_RE.findall(ticket['parents'] or ''))
-            for id in ids:
-                if Ticket(self.env, id)['status'] == 'closed':
+            ids = list(set(NUMBERS_RE.findall(ticket['parents'] or '')))
+            if ids:
+                int_ids = [int(i) for i in ids]
+                rows = self.env.db_query("""
+                    SELECT id FROM ticket
+                    WHERE id IN %s AND status = 'closed'
+                    """, (int_ids,))
+                for id, in rows:
                     msg = _("Cannot reopen because parent ticket #%(id)s "
                             "is closed", id=id)
                     yield None, msg
 
-    def _create_subtickets_table(self, req, children, tbody, depth=0):
-        """Recursively create list table of subtickets
-        """
+    def _collect_ids(self, children):
+        """Collect all ticket IDs from a children tree."""
+        ids = set()
+        for id, subtree in children.items():
+            ids.add(id)
+            if subtree:
+                ids.update(self._collect_ids(subtree))
+        return ids
+
+    def _create_subtickets_table(self, req, children, tbody,
+                                 tickets_data, depth=0):
+        """Recursively create list table of subtickets."""
         if not children:
             return
         for id in sorted(children, key=lambda x: int(x)):
-            ticket = Ticket(self.env, id)
+            td = tickets_data.get(id, {})
 
             # the row
             r = []
             # Always show ID and summary
             attrs = {'href': req.href.ticket(id)}
-            if ticket['status'] == 'closed':
+            if td.get('status') == 'closed':
                 attrs['class_'] = 'closed'
             link = tag.a('#%s' % id, **attrs)
-            summary = tag.td(link, ': %s' % ticket['summary'],
+            summary = tag.td(link, ': %s' % td.get('summary', ''),
                              style='padding-left: %dpx;' % (depth * 15))
             r.append(summary)
 
             # Add other columns as configured.
+            ticket_type = td.get('type', '')
             for column in \
                     self.env.config.getlist('subtickets',
-                                            'type.%(type)s.table_columns'
-                                            % ticket):
+                                            'type.%s.table_columns'
+                                            % ticket_type):
                 if column == 'owner':
+                    owner = td.get('owner', '')
                     if self.opt_owner_url:
-                        href = req.href(self.opt_owner_url % ticket['owner'])
+                        href = req.href(self.opt_owner_url % owner)
                     else:
-                        href = req.href.query(status='!closed',
-                                              owner=ticket['owner'])
-                    e = tag.td(tag.a(ticket['owner'], href=href))
+                        href = req.href.query(status='!closed', owner=owner)
+                    e = tag.td(tag.a(owner, href=href))
                 elif column == 'milestone':
+                    milestone = td.get('milestone', '')
                     href = req.href.query(status='!closed',
-                                          milestone=ticket['milestone'])
-                    e = tag.td(tag.a(ticket['milestone'],
-                                     href=href))
+                                          milestone=milestone)
+                    e = tag.td(tag.a(milestone, href=href))
                 else:
-                    e = tag.td(ticket[column])
+                    e = tag.td(td.get(column, ''))
                 r.append(e)
             tbody.append(tag.tr(*r))
 
-            self._create_subtickets_table(req, children[id], tbody, depth + 1)
+            self._create_subtickets_table(req, children[id], tbody,
+                                          tickets_data, depth + 1)
