@@ -242,6 +242,7 @@ class SubTicketsModule(Component):
         result = {}
         refs = {parent_id: result}
         current_parents = [parent_id]
+        visited = {parent_id}
 
         d = 0
         while current_parents and (self.opt_recursion_depth == -1 or d <= self.opt_recursion_depth):
@@ -251,6 +252,9 @@ class SubTicketsModule(Component):
 
             next_parents = []
             for parent, child in rows:
+                if child in visited:
+                    continue
+                visited.add(child)
                 child_dict = {}
                 refs[parent][child] = child_dict
                 refs[child] = child_dict
