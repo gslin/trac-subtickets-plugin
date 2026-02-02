@@ -31,6 +31,7 @@ import re
 
 import pkg_resources
 
+from trac.admin import IAdminCommandProvider
 from trac.config import BoolOption
 from trac.core import Component, implements
 from trac.db import DatabaseManager
@@ -38,7 +39,7 @@ from trac.env import IEnvironmentSetupParticipant
 from trac.resource import ResourceNotFound
 from trac.ticket.api import ITicketChangeListener, ITicketManipulator
 from trac.ticket.model import Ticket
-from trac.util.text import exception_to_unicode
+from trac.util.text import exception_to_unicode, printout
 from trac.util.translation import domain_functions
 try:
     TicketNotifyEmail = None
@@ -61,7 +62,8 @@ _, tag_, N_, add_domain = domain_functions('tracsubtickets',
 
 class SubTicketsSystem(Component):
 
-    implements(IEnvironmentSetupParticipant,
+    implements(IAdminCommandProvider,
+               IEnvironmentSetupParticipant,
                ITicketChangeListener,
                ITicketManipulator)
 
@@ -157,6 +159,35 @@ class SubTicketsSystem(Component):
                 cfield.set('parents', 'text')
                 cfield.set('parents.label', 'Parent Tickets')
                 self.config.save()
+
+        self._do_repair()
+
+    # IAdminCommandProvider methods
+
+    def get_admin_commands(self):
+        yield ('subtickets repair', '', 'Repair subtickets table from parents field',
+               None, self._do_repair)
+
+    def _do_repair(self):
+        """Sync subtickets table from ticket_custom parents field."""
+        count = 0
+        with self.env.db_transaction as db:
+            rows = db("""
+                SELECT ticket, value FROM ticket_custom
+                WHERE name='parents' AND value IS NOT NULL AND value != ''
+                """)
+            for child_id, parents_value in rows:
+                for parent in NUMBERS_RE.findall(parents_value):
+                    existing = db("""
+                        SELECT 1 FROM subtickets WHERE parent=%s AND child=%s
+                        """, (parent, child_id))
+                    if not existing:
+                        db("INSERT INTO subtickets VALUES (%s, %s)",
+                           (parent, child_id))
+                        count += 1
+        if count:
+            printout(_("Repaired %(count)d missing subticket records.",
+                       count=count))
 
     # ITicketChangeListener methods
 
