@@ -118,74 +118,80 @@ class SubTicketsModule(Component):
     def post_process_request(self, req, template, data, content_type):
         path = req.path_info
 
-        if path.startswith('/ticket/') or path.startswith('/newticket'):
-            # get parent ticket's data
-            if data and 'ticket' in data:
-                ticket = data['ticket']
-                parents = ticket['parents'] or ''
-                ids = set(NUMBERS_RE.findall(parents))
-
-                if len(parents) > 0:
-                    self._append_parent_links(req, data, ids)
-
-                children = self.get_children(ticket.id)
-                if children:
-                    data['subtickets'] = children
-
-                # Generate HTML string and fill into script data.
-
-                button = None
-                link = None
-
-                div = tag.div(class_='description')
-                if 'TICKET_CREATE' in req.perm(ticket.resource) \
-                        and ticket['status'] != 'closed':
-                    opt_inherit = self.env.config.getlist(
-                        'subtickets', 'type.%(type)s.child_inherits' % ticket)
-                    if self.opt_add_style == 'link':
-                        inh = {f: ticket[f] for f in opt_inherit}
-                        link = tag.a(_('add'),
-                                     href=req.href.newticket(parents=ticket.id,
-                                                             **inh))
-                        link = tag.span('(', link, ')', class_='addsubticket')
-                    else:
-                        inh = [tag.input(type='hidden',
-                                         name=f,
-                                         value=ticket[f]) for f in opt_inherit]
-
-                        button = tag.form(
-                            tag.div(
-                                tag.input(type="submit",
-                                          value=_("Create"),
-                                          title=_("Create a child ticket")),
-                                inh,
-                                tag.input(type="hidden",
-                                          name="parents",
-                                          value=str(ticket.id)),
-                                class_="inlinebuttons"),
-                            method="get", action=req.href.newticket())
-                div.append(button)
-                div.append(tag.h3(_('Subtickets '), link))
-
-            if 'subtickets' in data:
-                # table
-                tbody = tag.tbody()
-                div.append(tag.table(tbody, class_='subtickets'))
-                # tickets
-                all_ids = self._collect_ids(data['subtickets'])
-                tickets_data = self._batch_load_ticket_data(all_ids)
-                self._create_subtickets_table(req, data['subtickets'],
-                                              tbody, tickets_data)
-
-            add_stylesheet(req, 'subtickets/css/subtickets.css')
-            add_script(req, 'subtickets/js/subtickets.js')
-            add_script_data(req, subtickets_div=str(div))
-
-        elif path.startswith('/admin/ticket/type') \
+        # Handle admin ticket type
+        if path.startswith('/admin/ticket/type') \
                 and data \
                 and set(['add', 'name']).issubset(data.keys()) \
                 and data['add'] == 'Add':
             self._add_per_ticket_type_option(data['name'])
+            return template, data, content_type
+
+        if not (path.startswith('/ticket/') or path.startswith('/newticket')):
+            return template, data, content_type
+
+        if not (data and 'ticket' in data):
+            return template, data, content_type
+
+        # Parent links (for both /ticket/ and /newticket)
+        ticket = data['ticket']
+        parents = ticket['parents'] or ''
+        ids = set(NUMBERS_RE.findall(parents))
+
+        if len(parents) > 0:
+            self._append_parent_links(req, data, ids)
+
+        # Subtickets UI only for existing tickets
+        if not path.startswith('/ticket/'):
+            return template, data, content_type
+
+        children = self.get_children(ticket.id)
+        if children:
+            data['subtickets'] = children
+
+        # Generate HTML string and fill into script data.
+        button = None
+        link = None
+
+        div = tag.div(class_='description')
+        if 'TICKET_CREATE' in req.perm(ticket.resource) \
+                and ticket['status'] != 'closed':
+            opt_inherit = self.env.config.getlist(
+                'subtickets', 'type.%(type)s.child_inherits' % ticket)
+            if self.opt_add_style == 'link':
+                inh = {f: ticket[f] for f in opt_inherit}
+                link = tag.a(_('add'),
+                             href=req.href.newticket(parents=ticket.id,
+                                                     **inh))
+                link = tag.span('(', link, ')', class_='addsubticket')
+            else:
+                inh = [tag.input(type='hidden',
+                                 name=f,
+                                 value=ticket[f]) for f in opt_inherit]
+                button = tag.form(
+                    tag.div(
+                        tag.input(type="submit",
+                                  value=_("Create"),
+                                  title=_("Create a child ticket")),
+                        inh,
+                        tag.input(type="hidden",
+                                  name="parents",
+                                  value=str(ticket.id)),
+                        class_="inlinebuttons"),
+                    method="get", action=req.href.newticket())
+        div.append(button)
+        div.append(tag.h3(_('Subtickets '), link))
+
+        if 'subtickets' in data:
+            tbody = tag.tbody()
+            div.append(tag.table(tbody, class_='subtickets'))
+            all_ids = self._collect_ids(data['subtickets'])
+            tickets_data = self._batch_load_ticket_data(all_ids)
+            self._create_subtickets_table(req, data['subtickets'],
+                                          tbody, tickets_data)
+
+        add_stylesheet(req, 'subtickets/css/subtickets.css')
+        add_script(req, 'subtickets/js/subtickets.js')
+        add_script_data(req, subtickets_div=str(div))
 
         return template, data, content_type
 
