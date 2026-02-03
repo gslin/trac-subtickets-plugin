@@ -199,11 +199,13 @@ class SubTicketsModule(Component):
         """Batch load ticket data for multiple IDs."""
         if not ticket_ids:
             return {}
-        id_list = list(ticket_ids)
+        # Defensive: ensure all IDs are int to prevent SQL injection.
+        id_list = [int(x) for x in ticket_ids]
+        placeholders = ','.join(['%s'] * len(id_list))
         rows = self.env.db_query("""
             SELECT id, type, status, summary, owner, milestone
-            FROM ticket WHERE id IN %s
-            """, (id_list,))
+            FROM ticket WHERE id IN ({0})
+            """.format(placeholders), id_list)
         result = {}
         for row in rows:
             result[row[0]] = {
@@ -212,14 +214,15 @@ class SubTicketsModule(Component):
             }
         custom_rows = self.env.db_query("""
             SELECT ticket, name, value FROM ticket_custom
-            WHERE ticket IN %s
-            """, (id_list,))
+            WHERE ticket IN ({0})
+            """.format(placeholders), id_list)
         for ticket_id, name, value in custom_rows:
             if ticket_id in result:
                 result[ticket_id][name] = value
         return result
 
     def _append_parent_links(self, req, data, ids):
+        # Defensive: ensure all IDs are int to prevent SQL injection.
         int_ids = [int(i) for i in ids]
         tickets_data = self._batch_load_ticket_data(int_ids)
         links = []
@@ -252,9 +255,12 @@ class SubTicketsModule(Component):
 
         d = 0
         while current_parents and (self.opt_recursion_depth == -1 or d <= self.opt_recursion_depth):
+            # Defensive: ensure all IDs are int to prevent SQL injection.
+            current_parents = [int(x) for x in current_parents]
+            placeholders = ','.join(['%s'] * len(current_parents))
             rows = self.env.db_query("""
-                SELECT parent, child FROM subtickets WHERE parent IN %s
-                """, (current_parents,))
+                SELECT parent, child FROM subtickets WHERE parent IN ({0})
+                """.format(placeholders), current_parents)
 
             next_parents = []
             for parent, child in rows:
@@ -291,11 +297,13 @@ class SubTicketsModule(Component):
         elif action == 'reopen':
             ids = list(set(NUMBERS_RE.findall(ticket['parents'] or '')))
             if ids:
+                # Defensive: ensure all IDs are int to prevent SQL injection.
                 int_ids = [int(i) for i in ids]
+                placeholders = ','.join(['%s'] * len(int_ids))
                 rows = self.env.db_query("""
                     SELECT id FROM ticket
-                    WHERE id IN %s AND status = 'closed'
-                    """, (int_ids,))
+                    WHERE id IN ({0}) AND status = 'closed'
+                    """.format(placeholders), int_ids)
                 for id, in rows:
                     msg = _("Cannot reopen because parent ticket #%(id)s "
                             "is closed", id=id)
