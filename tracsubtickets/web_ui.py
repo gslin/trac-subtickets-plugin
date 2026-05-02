@@ -27,12 +27,15 @@
 # ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
 # POSSIBILITY OF SUCH DAMAGE.
 
+from datetime import datetime
+
 from trac.config import Option, IntOption, ChoiceOption, ListOption
 from trac.core import Component, implements
 from trac.web.api import IRequestFilter
 from trac.web.chrome import ITemplateProvider, add_script, add_script_data, add_stylesheet
+from trac.util.datefmt import format_date, from_utimestamp, user_time
 from trac.util.html import html as tag
-from trac.ticket.api import ITicketManipulator
+from trac.ticket.api import ITicketManipulator, TicketSystem
 from trac.ticket.model import Type as TicketType
 from .api import NUMBERS_RE, _
 
@@ -212,13 +215,23 @@ class SubTicketsModule(Component):
                 'type': row[1], 'status': row[2], 'summary': row[3],
                 'owner': row[4], 'milestone': row[5],
             }
+        field_types = {f['name']: f.get('type')
+                       for f in TicketSystem(self.env).get_ticket_fields()}
         custom_rows = self.env.db_query("""
             SELECT ticket, name, value FROM ticket_custom
             WHERE ticket IN ({0})
             """.format(placeholders), id_list)
         for ticket_id, name, value in custom_rows:
-            if ticket_id in result:
-                result[ticket_id][name] = value
+            if ticket_id not in result:
+                continue
+            # Match Trac's Ticket model: deserialize 'time' custom fields
+            # from zero-padded microseconds-since-epoch to datetime.
+            if field_types.get(name) == 'time' and value:
+                try:
+                    value = from_utimestamp(int(value))
+                except (TypeError, ValueError):
+                    pass
+            result[ticket_id][name] = value
         return result
 
     def _append_parent_links(self, req, data, ids):
@@ -356,7 +369,10 @@ class SubTicketsModule(Component):
                                           milestone=milestone)
                     e = tag.td(tag.a(milestone, href=href))
                 else:
-                    e = tag.td(td.get(column, ''))
+                    value = td.get(column, '')
+                    if isinstance(value, datetime):
+                        value = user_time(req, format_date, value)
+                    e = tag.td(value)
                 r.append(e)
             tbody.append(tag.tr(*r))
 
