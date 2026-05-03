@@ -205,33 +205,34 @@ class SubTicketsModule(Component):
         # Defensive: ensure all IDs are int to prevent SQL injection.
         id_list = [int(x) for x in ticket_ids]
         placeholders = ','.join(['%s'] * len(id_list))
-        rows = self.env.db_query("""
-            SELECT id, type, status, summary, owner, milestone
-            FROM ticket WHERE id IN ({0})
-            """.format(placeholders), id_list)
+        fields = TicketSystem(self.env).get_ticket_fields()
+        field_types = {f['name']: f.get('type') for f in fields}
+        std_field_names = [f['name'] for f in fields if not f.get('custom')]
+        # 'id' is the primary key and not in get_ticket_fields().
+        cols = ['id'] + std_field_names
         result = {}
-        for row in rows:
-            result[row[0]] = {
-                'type': row[1], 'status': row[2], 'summary': row[3],
-                'owner': row[4], 'milestone': row[5],
-            }
-        field_types = {f['name']: f.get('type')
-                       for f in TicketSystem(self.env).get_ticket_fields()}
-        custom_rows = self.env.db_query("""
-            SELECT ticket, name, value FROM ticket_custom
-            WHERE ticket IN ({0})
-            """.format(placeholders), id_list)
-        for ticket_id, name, value in custom_rows:
-            if ticket_id not in result:
-                continue
-            # Match Trac's Ticket model: deserialize 'time' custom fields
-            # from zero-padded microseconds-since-epoch to datetime.
-            if field_types.get(name) == 'time' and value:
-                try:
-                    value = from_utimestamp(int(value))
-                except (TypeError, ValueError):
-                    pass
-            result[ticket_id][name] = value
+        with self.env.db_query as db:
+            sql_cols = ','.join(db.quote(c) for c in cols)
+            rows = db("""
+                SELECT {0} FROM ticket WHERE id IN ({1})
+                """.format(sql_cols, placeholders), id_list)
+            for row in rows:
+                result[row[0]] = dict(zip(cols, row))
+            custom_rows = db("""
+                SELECT ticket, name, value FROM ticket_custom
+                WHERE ticket IN ({0})
+                """.format(placeholders), id_list)
+            for ticket_id, name, value in custom_rows:
+                if ticket_id not in result:
+                    continue
+                # Match Trac's Ticket model: deserialize 'time' custom fields
+                # from zero-padded microseconds-since-epoch to datetime.
+                if field_types.get(name) == 'time' and value:
+                    try:
+                        value = from_utimestamp(int(value))
+                    except (TypeError, ValueError):
+                        pass
+                result[ticket_id][name] = value
         return result
 
     def _append_parent_links(self, req, data, ids):
